@@ -10,6 +10,7 @@ import subprocess
 import os
 import re
 from urllib.parse import urlparse, parse_qs, unquote, quote
+from requests.compat import urljoin
 
 app = Flask(__name__)
 CORS(app)
@@ -127,27 +128,37 @@ def parse_file(file):
     return payload_list, status_list, length_list
 
 # ==============================
-# FUNGSI CRAWL DENGAN PLAYWRIGHT
+# FUNGSI CRAWL DENGAN REQUESTS (CEPAT, TANPA BROWSER)
 # ==============================
-def crawl_with_playwright(url):
-    from playwright.sync_api import sync_playwright
+def crawl_with_requests(url):
     endpoints = []
-    
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.set_default_timeout(30000)
-            page.goto(url, wait_until="networkidle")
-            links = page.eval_on_selector_all('a[href]', 'els => els.map(el => el.href)')
-            browser.close()
-            for link in links:
-                if link and "?" in link and "=" in link:
-                    endpoints.append(link)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r = requests.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
+
+        hrefs = re.findall(r'href=["\'](.*?)["\']', r.text, re.IGNORECASE)
+
+        for href in hrefs:
+            if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
+            if not href.startswith(("http://", "https://")):
+                href = urljoin(url, href)
+            if "?" in href and "=" in href:
+                endpoints.append(href)
+
+        raw_urls = re.findall(r'(https?://[^\s"\'<>]+)', r.text)
+        for u in raw_urls:
+            if "?" in u and "=" in u and u not in endpoints:
+                endpoints.append(u)
+
+        seen = set()
+        return [ep for ep in endpoints if not (ep in seen or seen.add(ep))]
     except Exception as e:
-        print(f"❌ Playwright error: {e}")
-    
-    return endpoints
+        print(f"❌ Requests crawl error: {e}")
+        return []
 
 # ==============================
 # FUNGSI CRAWL DENGAN KATANA
@@ -175,7 +186,7 @@ def crawl_with_katana(url):
         return []
 
 # ==============================
-# ENDPOINT /crawl (HANYA 1!)
+# ENDPOINT /crawl
 # ==============================
 @app.route("/crawl", methods=["POST"])
 def crawl():
@@ -188,28 +199,20 @@ def crawl():
     print(f"🔍 Crawling: {url}")
     print(f"📌 Environment: {'Production (Linux)' if IS_PRODUCTION else 'Local (Windows)'}")
     
-    if IS_PRODUCTION:
-        print("   🐍 Using Playwright...")
-        endpoints = crawl_with_playwright(url)
-    else:
-        print("   ⚡ Using Katana...")
+    print("   🌐 Using Requests crawler...")
+    endpoints = crawl_with_requests(url)
+    
+    if not endpoints and not IS_PRODUCTION:
+        print("   ⚡ Fallback ke Katana...")
         endpoints = crawl_with_katana(url)
     
     if not endpoints:
-        if not IS_PRODUCTION:
-            try:
-                print("   🐍 Fallback to Playwright...")
-                endpoints = crawl_with_playwright(url)
-            except:
-                pass
-        
-        if not endpoints:
-            return jsonify({
-                "endpoints": [],
-                "params": [],
-                "count": 0,
-                "message": "⚠️ Tidak ada endpoint ditemukan."
-            })
+        return jsonify({
+            "endpoints": [],
+            "params": [],
+            "count": 0,
+            "message": "⚠️ Tidak ada endpoint ditemukan."
+        })
     
     params = []
     for ep in endpoints:
@@ -259,7 +262,7 @@ def analyze():
     return jsonify(results)
 
 # ==============================
-# ENDPOINT /scan (HANYA 1!)
+# ENDPOINT /scan
 # ==============================
 @app.route("/scan", methods=["POST"])
 def scan():
@@ -296,7 +299,6 @@ def scan():
             status = r.status_code
             length = 0
             
-            # Multi-layer length extraction
             try:
                 if r.text:
                     length = len(r.text)
@@ -365,8 +367,7 @@ def scan():
 # ==============================
 @app.route("/detect-params", methods=["POST"])
 def detect_params():
-    data = request.get_json()
-    url = data.get("url")
+    url = request.get_json().get("url")
     if not url:
         return jsonify({"error": "URL kosong"}), 400
 
