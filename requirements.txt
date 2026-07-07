@@ -6,4 +6,3 @@ scikit-learn
 xgboost
 pandas
 numpy
-playwright
